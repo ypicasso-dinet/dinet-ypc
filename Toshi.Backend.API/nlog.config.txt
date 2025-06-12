@@ -1,0 +1,41 @@
+﻿<?xml version="1.0" encoding="utf-8" ?>
+<nlog xmlns="http://www.nlog-project.org/schemas/NLog.xsd"
+      xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+      autoReload="true"
+      throwConfigExceptions="true">
+	<extensions>
+		<add assembly="NLog.Web.AspNetCore"/>
+	</extensions>
+
+	<targets>
+		<!-- Escribir logs en la consola -->
+		<target name="console" xsi:type="Console" layout="${longdate}|${level:uppercase=true}|${logger}|${message} ${exception:format=ToString}" />
+
+		<!-- Escribir logs en un archivo -->
+		<target name="file" xsi:type="File"
+				fileName="logs/${shortdate}.log"
+				layout="${longdate}|${level:uppercase=true}|${logger}|${message} ${exception:format=ToString}"
+				archiveFileName="logs/archives/{#}.log"
+				archiveEvery="Day"
+				archiveNumbering="Rolling"
+				maxArchiveFiles="7"
+				concurrentWrites="true"
+				keepFileOpen="false" />
+
+		<target name="database" xsi:type="DataBase">
+			<connectionString></connectionString>
+			<commandText>
+				INSERT INTO DBO.REQUEST_LOGS (Date, Level, Logger, Message) VALUES (@Date, @Level, @Logger, @Message);
+			</commandText>
+			<parameter name="@Date" layout="${date}" />
+			<parameter name="@Level" layout="${level}" />
+			<parameter name="@Logger" layout="${logger}" />
+			<parameter name="@Message" layout="${message}" />
+		</target>
+	</targets>
+
+	<rules>
+		<!-- Reglas para escribir logs -->
+		<logger name="*" minlevel="Debug" writeTo="console,file,database" />
+	</rules>
+</nlog>

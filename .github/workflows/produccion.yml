@@ -1,0 +1,51 @@
+# github action to buld and deploy to FTP
+name: Deploy To Somee QA
+
+on:
+  push:
+    branches:
+      - main
+  # pull_request:
+  #   branches:
+  #     - main
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: 🛎️ Checkout Repository
+        uses: actions/checkout@v3
+
+      - name: 🔧 Setup .NET Core
+        uses: actions/setup-dotnet@v3
+        with:
+          dotnet-version: 8.0.x
+          
+      - name: 🔄 Replace Connection String in appsettings.json
+        run: |
+            jq '.ConnectionStrings.ToshiDBContext = "${{ secrets.CONNECTION_STRING_QA }}"' ./Toshi.Backend.API/appsettings.json > temp.json && mv temp.json ./Toshi.Backend.API/appsettings.json
+
+      - name: 🔄 Replace JetSettings Key in appsettings.json
+        run: |
+            jq '.JwtSettings.Key = "${{ secrets.JWT_SETTINGS_KEY_QA }}"' ./Toshi.Backend.API/appsettings.json > temp.json && mv temp.json ./Toshi.Backend.API/appsettings.json
+
+      - name: 📦 Restore Dependencies
+        run: dotnet restore ./Toshi.Backend.API/Toshi.Backend.API.csproj
+      
+      - name: 📦 Build
+        run: dotnet build ./Toshi.Backend.API/Toshi.Backend.API.csproj
+
+      - name: 🚀 Build and Publish
+        run: dotnet publish ./Toshi.Backend.API/Toshi.Backend.API.csproj -c Release -o ./publish
+#        run: dotnet publish ./Toshi.Backend.API/Toshi.Backend.API.csproj --configuration Release --output ./publish
+
+      - name: 📂 Deploy via FTP
+        run: |
+          sudo apt-get install -y lftp
+          lftp -e "
+            open -u ${{ secrets.ftp_username }},${{ secrets.ftp_password }} ${{ secrets.ftp_server_qa }};
+            mirror -R ./publish/ ${{ secrets.FTP_REMOTE_PATH }};
+            bye
+          "

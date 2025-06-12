@@ -1,0 +1,431 @@
+﻿<#@ template debug="false" hostspecific="true" language="C#" #>
+<#@ assembly name="System" #>
+<#@ assembly name="System.Data" #>
+<#@ assembly name="System.IO" #>
+<#@ assembly name="System.Core" #>
+<#@ assembly name="System.Runtime" #>
+<#@ assembly name="System.Text.RegularExpressions" #>
+<#@ assembly name="Newtonsoft.Json" #>
+<#@ import namespace="System" #>
+<#@ import namespace="System.Data" #>
+<#@ import namespace="System.IO" #>
+<#@ import namespace="System.Linq" #>
+<#@ import namespace="System.Text" #>
+<#@ import namespace="System.Text.RegularExpressions" #>
+<#@ import namespace="System.Runtime" #>
+<#@ import namespace="Newtonsoft.Json.Linq" #>
+<#@ include file="EF.Utility.CS.ttinclude"#>
+<#@ output extension=".cs" #><#
+    //
+    var code = new CodeGenerationTools(this);
+    var	fileManager = EntityFrameworkTemplateFileManager.Create(this);
+
+	string appSettingsFile = new DirectoryInfo(Directory.GetCurrentDirectory()).GetDirectories("*.API")[0].GetFiles("*.Development.json")[0].FullName;
+	string json = File.ReadAllText(appSettingsFile);
+	
+	JObject config = JObject.Parse(json);
+	string connectionString = config["ConnectionStrings"]?["ToshiDBContext"]?.ToString();
+    
+    var codeNamespace = code.VsNamespaceSuggestion();
+    var tablas = new List<Tabla>();
+    var referencias = new List<Referencia>();
+    var primaries = new List<Tabla>();
+
+	// Crear y abrir la conexión a la base de datos
+    using (System.Data.SqlClient.SqlConnection connection = new System.Data.SqlClient.SqlConnection(connectionString))
+    {
+        connection.Open();
+
+        // Definir la consulta para obtener las tablas y columnas
+        string query = """
+            SELECT 
+                t.TABLE_NAME, 
+                c.COLUMN_NAME, 
+                CASE
+                    WHEN c.DATA_TYPE LIKE '%CHAR' OR c.DATA_TYPE LIKE '%TEXT' THEN 'string'
+                    WHEN c.DATA_TYPE IN ('DATETIME', 'DATE') THEN 'DateTime'
+                    WHEN c.DATA_TYPE IN ('DECIMAL', 'NUMERIC') THEN 'decimal'
+                    WHEN c.DATA_TYPE IN ('INT') THEN 'int'
+                    WHEN c.DATA_TYPE IN ('BIT') THEN 'bool'
+                    ELSE 'Object' 
+                END
+                AS DATA_TYPE, 
+                CAST(CASE c.IS_NULLABLE WHEN 'YES' THEN 1 ELSE 0 END AS BIT) AS IS_NULL,
+                CAST(CASE WHEN c.COLUMN_NAME IN ('cod_estado','usu_insert','fec_insert','usu_update','fec_update') THEN 0 ELSE 1 END AS BIT) AS IS_VISIBLE
+            FROM INFORMATION_SCHEMA.TABLES t
+            JOIN INFORMATION_SCHEMA.COLUMNS c ON t.TABLE_NAME = c.TABLE_NAME
+            WHERE t.TABLE_TYPE = 'BASE TABLE' AND t.TABLE_NAME <> 'REQUEST_LOGS'
+            ORDER BY t.TABLE_NAME, c.ORDINAL_POSITION;
+        """;
+
+        string queryRef = """
+            SELECT  
+                fk.name AS ForeignKeyName,
+                tp.name AS ParentTable,        -- Tabla Padre (Referenciada)
+                cp.name AS ParentColumn,       -- Columna en la Tabla Padre
+                tc.name AS ChildTable,         -- Tabla Hija (Que tiene la FK)
+                cc.name AS ChildColumn         -- Columna en la Tabla Hija
+            FROM sys.foreign_keys fk
+            INNER JOIN sys.foreign_key_columns fkc 
+                ON fk.object_id = fkc.constraint_object_id
+            INNER JOIN sys.tables tp 
+                ON fk.referenced_object_id = tp.object_id
+            INNER JOIN sys.columns cp 
+                ON fkc.referenced_column_id = cp.column_id AND fkc.referenced_object_id = cp.object_id
+            INNER JOIN sys.tables tc 
+                ON fk.parent_object_id = tc.object_id
+            INNER JOIN sys.columns cc 
+                ON fkc.parent_column_id = cc.column_id AND fkc.parent_object_id = cc.object_id
+            ORDER BY ChildTable, ForeignKeyName;
+        """;
+
+        string queryKeys = """
+            SELECT C.TABLE_NAME, C.COLUMN_NAME
+            FROM INFORMATION_SCHEMA.TABLE_CONSTRAINTS T
+            JOIN INFORMATION_SCHEMA.CONSTRAINT_COLUMN_USAGE C ON T.TABLE_NAME = C.TABLE_NAME AND T.CONSTRAINT_NAME = C.CONSTRAINT_NAME
+            WHERE T.CONSTRAINT_TYPE = 'PRIMARY KEY'
+            ORDER BY C.TABLE_NAME, C.COLUMN_NAME;
+        """;
+
+        using (System.Data.SqlClient.SqlCommand command = new System.Data.SqlClient.SqlCommand(query, connection))
+        {
+            using (System.Data.SqlClient.SqlDataReader reader = command.ExecuteReader())
+            {
+                int i = -1;
+                string currentTable = "";
+                
+                while (reader.Read())
+                {
+                    string tableName = reader["TABLE_NAME"].ToString();
+                    string columnName = reader["COLUMN_NAME"].ToString();
+                    string dataType = reader["DATA_TYPE"].ToString();
+                    bool isNull = (bool)reader["IS_NULL"];
+                    bool isVisible = (bool)reader["IS_VISIBLE"];
+
+                    if (currentTable != tableName)
+                    {
+                        i++;
+
+                        tablas.Add(new Tabla(tableName));
+
+                        currentTable = tableName;
+                    }
+
+                    tablas[i].Columns.Add(new Columna(columnName, dataType, isNull, isVisible));
+                }
+                
+            }
+        }
+
+        using (System.Data.SqlClient.SqlCommand command = new System.Data.SqlClient.SqlCommand(queryRef, connection))
+        {
+            using (System.Data.SqlClient.SqlDataReader reader = command.ExecuteReader())
+            {
+                while (reader.Read())
+                {
+                    string foreignKeyName = reader["ForeignKeyName"].ToString();
+                    string ParentTable = reader["ParentTable"].ToString();
+                    string ParentColumn = reader["ParentColumn"].ToString();
+                    string ChildTable = reader["ChildTable"].ToString();
+                    string ChildColumn = reader["ChildColumn"].ToString();
+
+                    referencias.Add(new Referencia {
+                        ForeignKeyName = reader["ForeignKeyName"].ToString(),
+                        ParentTable = reader["ParentTable"].ToString(),
+                        ParentColumn = reader["ParentColumn"].ToString(),
+                        ChildTable = reader["ChildTable"].ToString(),
+                        ChildColumn = reader["ChildColumn"].ToString()
+                    });
+                }
+            }
+        }
+
+        using (System.Data.SqlClient.SqlCommand command = new System.Data.SqlClient.SqlCommand(queryKeys, connection))
+        {
+            using (System.Data.SqlClient.SqlDataReader reader = command.ExecuteReader())
+            {
+                string tName = string.Empty;
+
+                while (reader.Read())
+                {
+                    string sTable = reader[0].ToString();
+                    string sColumn = reader[1].ToString();
+
+                    if (sTable != tName)
+                    {
+                        tName = sTable;
+
+                        primaries.Add(new Tabla(tName));
+                    }
+
+                    var oTable = primaries.FirstOrDefault(w => w.Name == tName);
+
+                    oTable.Columns.Add(new Columna(sColumn));
+                }
+            }
+        }
+    }
+    
+    fileManager.StartNewFile("Persistence\\Data\\ToshiDBContext.cs");
+#>
+using Microsoft.EntityFrameworkCore;
+using <#=codeNamespace.Replace(".Infraestructure", "")#>.Domain;
+using <#=codeNamespace.Replace(".Infraestructure", "")#>.Domain.Entities;
+
+namespace <#=codeNamespace#>.Persistence.Data
+{
+    public class ToshiDBContext : DbContext, IDatabaseService
+    {
+        private readonly SessionStorage session;
+
+        public ToshiDBContext(DbContextOptions<ToshiDBContext> options, SessionStorage sessionStorage) : base(options)
+        {
+            session = sessionStorage;
+        }
+
+        public override Task<int> SaveChangesAsync(CancellationToken cancellationToken = default)
+        {
+            foreach (var entry in ChangeTracker.Entries<BaseDomainModel>())
+            {
+                switch (entry.State)
+                {
+                    case EntityState.Detached:
+                        break;
+                    case EntityState.Unchanged:
+                        break;
+                    case EntityState.Deleted:
+                        entry.State = EntityState.Modified;
+
+                        entry.Entity.cod_estado = false;
+                        entry.Entity.fec_update = BaseDomainModel.GetNow();
+                        entry.Entity.usu_update = session?.GetUser()?.CodUsuario;
+                        break;
+                    case EntityState.Modified:
+                        entry.Entity.cod_estado = true;
+                        entry.Entity.fec_update = BaseDomainModel.GetNow();
+                        entry.Entity.usu_update = session?.GetUser()?.CodUsuario;
+                        break;
+                    case EntityState.Added:
+                        entry.Entity.cod_estado = true;
+                        entry.Entity.fec_insert = BaseDomainModel.GetNow();
+                        entry.Entity.usu_insert = session?.GetUser()?.CodUsuario;
+                        break;
+                    default:
+                        break;
+                }
+            }
+
+            return base.SaveChangesAsync(cancellationToken);
+        }
+
+        protected override void OnModelCreating(ModelBuilder modelBuilder)
+        {
+            modelBuilder.ApplyConfigurationsFromAssembly(typeof(ToshiDBContext).Assembly);
+        }
+
+<#
+            foreach (var tabla in tablas)
+            {
+#>
+        public virtual DbSet<<#=Titulo(tabla.Name)#>Entity> <#=Titulo(tabla.Name)#> { get; set; }
+<#
+            }
+#>
+    }
+}
+<#
+    var files = new DirectoryInfo(Directory.GetCurrentDirectory()).GetDirectories("*.Application")[0].GetFiles("Contracts\\Persistence\\*Repository.cs");
+
+    fileManager.StartNewFile("InfraestructureServiceRegistration.cs");
+#>
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
+using <#=codeNamespace.Replace(".Infraestructure", "")#>.Application.Contracts.Persistence;
+using <#=codeNamespace#>.Persistence.Data;
+using <#=codeNamespace#>.Repositories;
+
+namespace <#=codeNamespace#>
+{
+    public static class InfraestructureServiceRegistration
+    {
+        public static IServiceCollection AddInfrastructureService(this IServiceCollection services, IConfiguration configuration)
+        {
+            services.AddDbContext<ToshiDBContext>(options =>
+                options.UseSqlServer(configuration.GetConnectionString("ToshiDBContext")!)
+            );
+
+            services.AddScoped<IUnitOfWork, UnitOfWork>();
+            services.AddScoped(typeof(IAsyncRepository<>), typeof(RepositoryBase<>));
+
+<#
+            foreach (var file in files)
+            {
+                if (
+                    file.Name.ToLower().Equals("IAsyncRepository.cs", StringComparison.OrdinalIgnoreCase) ||
+                    file.Name.ToLower().Equals("IUnitOfWork.cs", StringComparison.OrdinalIgnoreCase)
+                )
+                {
+                    continue;
+                }
+#>
+            services.AddScoped<<#=file.Name.Replace(".cs", "")#>, <#=file.Name.Substring(1).Replace(".cs", "")#>>();
+<#
+            }
+#>
+
+            return services;
+        }
+    }
+}
+<#
+
+    foreach (var entity in tablas)
+    {
+        var classEntity = Titulo(entity.Name) + "Entity";
+        var className = Titulo(entity.Name) + "Configuration";
+
+        var padres = referencias.Where(w => w.ChildTable == entity.Name).ToList();
+        var hijos = referencias.Where(w => w.ParentTable == entity.Name).ToList();
+        var oTabla = primaries.FirstOrDefault(w => w.Name == entity.Name);
+        var sKeys = oTabla.Columns.Count == 1 ? "e." + oTabla.Columns[0].Name : "new { " + string.Join(", ", oTabla.Columns.Select(s => "e." + s.Name).ToArray()) + " }";
+
+        fileManager.StartNewFile("Persistence\\Data\\Configurations\\" + className + ".cs");
+#>
+using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Metadata.Builders;
+using <#=codeNamespace.Replace("Infraestructure", "")#>Domain.Entities;
+
+namespace <#=codeNamespace#>.Persistence.Data.Configurations
+{
+    public class <#=className#> : IEntityTypeConfiguration<<#=classEntity#>>
+    {
+        public void Configure(EntityTypeBuilder<<#=classEntity#>> builder)
+        {
+            builder.ToTable("<#=entity.Name#>");
+            builder.HasKey(e => <#= sKeys #>);
+
+<#
+    foreach (var column in entity.Columns)
+    {
+        if (!column.IsVisible) continue;
+
+        var n = column.IsNull ? "?" : "";
+        var s = !column.IsNull && column.Type == "string" ? " = string.Empty;" : "";
+#>
+            builder.Property(p => p.<#=column.Name#>).HasColumnName("<#=column.Name#>");
+<#
+    }
+#>
+            
+            builder.SetAudithory();
+
+<#
+    foreach (var padre in padres)
+    {
+#>
+            builder.HasOne(o => o.<#=padre.ParentTable.ToLower()#>).WithMany(m => m.<#=DetailName(padre.ChildTable)#>).HasForeignKey(f => f.<#=padre.ParentColumn#>);
+<#
+    }
+
+    foreach (var hijo in hijos)
+    {
+#>
+            builder.HasMany(m => m.<#=DetailName(hijo.ChildTable)#>).WithOne(o => o.<#=hijo.ParentTable.ToLower()#>).HasForeignKey(f => f.<#=hijo.ParentColumn#>);
+<#
+    }
+#>
+        }
+    }
+}
+<#
+    } //foreach
+
+    fileManager.Process();
+#> 
+<#+
+    public class Tabla
+    {
+        public string Name { get; set; }
+        public List<Columna> Columns { get; set; } 
+
+        public Tabla(string name)
+        {
+            this.Name = name;
+            this.Columns = new List<Columna>();
+        }
+    }
+
+    public class Columna
+    {
+        public Columna(string name)
+        {
+            this.Name = name;
+            this.Type = string.Empty;
+            this.IsNull = false;
+            this.IsVisible = false;
+        }
+
+        public Columna(string name, string type, bool isNull, bool isVisible)
+        {
+            this.Name = name;
+            this.Type = type;
+            this.IsNull = isNull;
+            this.IsVisible = isVisible;
+        }
+
+        public string Name { get; set; }
+        public string Type { get; set; }
+        public bool IsNull { get; set; }
+        public bool IsVisible { get; set; }
+    }
+
+    public class Referencia
+    {
+        public Referencia()
+        {
+        }
+
+        public string ForeignKeyName { get; set; }
+        public string ParentTable { get; set; }
+        public string ParentColumn { get; set; }
+        public string ChildTable { get; set; }
+        public string ChildColumn { get; set; }
+    }
+
+    public static void ArgumentNotNull<T>(T arg, string name) where T : class
+    {
+        if (arg == null)
+        {
+            throw new ArgumentNullException(name);
+        }
+    }
+
+    private static readonly Lazy<System.Resources.ResourceManager> ResourceManager =
+        new Lazy<System.Resources.ResourceManager>(
+            () => new System.Resources.ResourceManager("System.Data.Entity.Design", typeof(MetadataItemCollectionFactory).Assembly), isThreadSafe: true);
+
+    public static string GetResourceString(string resourceName)
+    {
+        ArgumentNotNull(resourceName, "resourceName");
+
+        return ResourceManager.Value.GetString(resourceName, null);
+    }
+
+    public static string Titulo(string value)
+    {
+        var values = value.Split('_');
+        var items = values.Select(s => System.Globalization.CultureInfo.CurrentCulture.TextInfo.ToTitleCase(s.ToLower()));
+        
+        return string.Join("", items);
+    }
+
+    public static string DetailName(string value)
+    {
+        var esVocal = Regex.IsMatch(value, "[aeiou]$", RegexOptions.IgnoreCase);
+        var esY = value.ToLower().EndsWith("y");
+        var name = value.ToLower() + (esVocal ? "s" : esY ? "ies" : "es");
+
+        return name;
+    }
+#>
